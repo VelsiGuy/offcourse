@@ -1,12 +1,48 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /posts/{postId} {
-      // Anyone can read the board.
-      allow read: if true;
 
-      // Signed-in users can post as themselves, with sane limits.
-      allow create: if request.auth != null
+    function signedIn() { return request.auth != null; }
+    function isAdmin() {
+      return signedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+    function isBanned() {
+      return signedIn() && exists(/databases/$(database)/documents/banned/$(request.auth.uid));
+    }
+
+    // Admin list: you add yourself by hand in the Firebase console.
+    // People can only check their own entry, and the website can never edit this.
+    match /admins/{uid} {
+      allow read: if signedIn() && request.auth.uid == uid;
+      allow write: if false;
+    }
+
+    // Banned users: only admins can add or remove. A banned user can see their own entry.
+    match /banned/{uid} {
+      allow read: if isAdmin() || (signedIn() && request.auth.uid == uid);
+      allow create, delete: if isAdmin();
+      allow update: if false;
+    }
+
+    // Admin-only announcements. Anyone can read.
+    match /announcements/{id} {
+      allow read: if true;
+      allow create: if isAdmin()
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.text is string
+        && request.resource.data.text.size() > 0
+        && request.resource.data.text.size() <= 1000
+        && request.resource.data.name is string
+        && request.resource.data.name.size() <= 40
+        && request.resource.data.at == request.time;
+      allow delete: if isAdmin();
+      allow update: if false;
+    }
+
+    // Community board.
+    match /posts/{postId} {
+      allow read: if true;
+      allow create: if signedIn() && !isBanned()
         && request.resource.data.uid == request.auth.uid
         && request.resource.data.text is string
         && request.resource.data.text.size() > 0
@@ -15,9 +51,8 @@ service cloud.firestore {
         && request.resource.data.name is string
         && request.resource.data.name.size() <= 40
         && request.resource.data.at == request.time;
-
-      // People can delete only their own posts. No editing.
-      allow delete: if request.auth != null && resource.data.uid == request.auth.uid;
+      // Authors can delete their own posts. Admins can delete anyone's.
+      allow delete: if signedIn() && (resource.data.uid == request.auth.uid || isAdmin());
       allow update: if false;
     }
   }

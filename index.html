@@ -102,6 +102,13 @@ nav.nav a:hover{border-color:var(--bronze)}
 .post p{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}
 .post button{background:none;border:0;color:var(--muted);cursor:pointer;font:inherit;text-decoration:underline;margin-top:.5rem;padding:0}
 .cm-row input{font:inherit;color:var(--text);background:var(--sea);border:1px solid var(--line);padding:.55rem .7rem;border-radius:2px;flex:1 1 180px;min-width:0}
+.post.ann{border-left-color:var(--bronze);background:var(--deep)}
+.post .tag.a{background:var(--bronze);color:#1a1206;font-weight:600}
+.post .acts{display:flex;gap:1rem;margin-top:.5rem}
+.post .acts button{margin-top:0}
+.post .acts .danger{color:#ff8b8b}
+.ban-item{display:flex;gap:1rem;align-items:center;justify-content:space-between;padding:.4rem 0;border-bottom:1px solid var(--line)}
+.ban-item button{background:none;border:0;color:var(--text);text-decoration:underline;cursor:pointer;font:inherit}
 footer{padding:2.5rem 0 3rem;color:var(--muted);font-size:.9rem}
 </style>
 </head>
@@ -162,6 +169,15 @@ footer{padding:2.5rem 0 3rem;color:var(--muted);font-size:.9rem}
       </div>
     </form>
     <div class="cm-row" id="authIn" hidden style="margin:0 0 1rem"><span id="ainfo"></span><button type="button" id="asignout" style="background:none;border:0;color:var(--muted);text-decoration:underline;cursor:pointer;font:inherit">Sign out</button></div>
+    <div id="ann" aria-live="polite"></div>
+    <div class="cm-box" id="adminBox" hidden>
+      <h3 style="font-size:1.6rem;margin-bottom:.75rem">Admin panel</h3>
+      <label for="atext" style="display:block;margin-bottom:.4rem">Post an announcement (only admins can do this)</label>
+      <textarea id="atext" rows="3" maxlength="1000" placeholder="Announcement for everyone..."></textarea>
+      <div class="cm-row"><button class="btn" id="abtn" type="button">Post announcement</button></div>
+      <h4 style="font-family:Cormorant,Georgia,serif;font-size:1.3rem;margin:1.25rem 0 .5rem">Banned users</h4>
+      <div id="banlist" style="color:var(--muted)">No one is banned.</div>
+    </div>
     <div class="cm-box" id="composer" hidden>
       <label for="ptext" style="display:block;margin-bottom:.4rem">Write a post</label>
       <textarea id="ptext" rows="3" maxlength="500" placeholder="What's on your mind?"></textarea>
@@ -273,7 +289,7 @@ draw("all");show(0);mark();
 <script type="module">
 import {initializeApp} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {getAuth,onAuthStateChanged,createUserWithEmailAndPassword,signInWithEmailAndPassword,signInWithPopup,GoogleAuthProvider,signOut,updateProfile,sendPasswordResetEmail} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
-import {getFirestore,collection,addDoc,deleteDoc,doc,query,orderBy,limit,onSnapshot,serverTimestamp} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import {getFirestore,collection,addDoc,deleteDoc,doc,getDoc,setDoc,getDocs,where,query,orderBy,limit,onSnapshot,serverTimestamp} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 /* PASTE YOUR FIREBASE WEB APP CONFIG HERE (see README.md, step 1) */
 const firebaseConfig={
@@ -285,7 +301,7 @@ const firebaseConfig={
 
 const $=id=>document.getElementById(id);
 const who=$("who"),comp=$("composer"),feed=$("feed"),tag=$("ptag"),txt=$("ptext"),btn=$("pbtn"),cnt=$("pcount");
-const authOut=$("authOut"),authIn=$("authIn");
+const authOut=$("authOut"),authIn=$("authIn"),annBox=$("ann"),adminBox=$("adminBox");
 tag.add(new Option("General",""));
 sagas.forEach(g=>tag.add(new Option(g.n+" Saga",g.n)));
 txt.oninput=()=>{cnt.textContent=txt.value.length+" / 500"};
@@ -301,7 +317,8 @@ if(firebaseConfig.apiKey.startsWith("YOUR_")){
     "auth/weak-password":"Pick a password with at least 6 characters.",
     "auth/invalid-email":"That email doesn't look right.",
     "auth/popup-closed-by-user":"Google sign-in was closed before it finished.",
-    "auth/too-many-requests":"Too many tries. Wait a bit and try again."
+    "auth/too-many-requests":"Too many tries. Wait a bit and try again.",
+    "auth/user-disabled":"This account has been disabled."
   }[e&&e.code]||("Something went wrong ("+(e&&e.code||"error")+")."));
 
   authOut.onsubmit=async ev=>{
@@ -329,17 +346,27 @@ if(firebaseConfig.apiKey.startsWith("YOUR_")){
   };
   $("asignout").onclick=()=>signOut(auth);
 
-  let user=null;
-  onAuthStateChanged(auth,u=>{
-    user=u;
-    authOut.hidden=!!u; authIn.hidden=!u; comp.hidden=!u;
+  let user=null,isAdmin=false,isBanned=false,unsubBans=null,posts=[],anns=[];
+
+  onAuthStateChanged(auth,async u=>{
+    user=u;isAdmin=false;isBanned=false;
+    if(unsubBans){unsubBans();unsubBans=null;}
+    authOut.hidden=!!u; authIn.hidden=!u;
     if(u){
       $("ainfo").textContent="Signed in as "+(u.displayName||u.email);
-      say("");
+      try{ isAdmin=(await getDoc(doc(db,"admins",u.uid))).exists(); }catch(e){}
+      try{ isBanned=(await getDoc(doc(db,"banned",u.uid))).exists(); }catch(e){}
+      if(isBanned) say("Your account has been banned from posting.");
+      else if(isAdmin) say("You're signed in as an admin.");
+      else say("");
+      if(isAdmin) watchBans();
     } else say("Sign in or create an account to post. Anyone can read the board.");
-    renderNow();
+    comp.hidden=!u||isBanned;
+    adminBox.hidden=!isAdmin;
+    renderPosts();renderAnns();
   });
 
+  /* ---------- posts ---------- */
   btn.onclick=async()=>{
     const t=txt.value.trim();
     if(!t||!user)return;
@@ -350,12 +377,25 @@ if(firebaseConfig.apiKey.startsWith("YOUR_")){
         name:(user.displayName||"Fan").slice(0,40),at:serverTimestamp()
       });
       txt.value="";cnt.textContent="0 / 500";
-    }catch(e){ say("Couldn't post ("+(e&&e.code||"error")+")."); }
+    }catch(e){ say(e&&e.code==="permission-denied"?"You can't post right now.":"Couldn't post ("+(e&&e.code||"error")+")."); }
     btn.disabled=false;
   };
 
-  let posts=[];
-  const renderNow=()=>{
+  const mkBtn=(label,fn,cls)=>{const b=document.createElement("button");b.type="button";b.textContent=label;if(cls)b.className=cls;b.onclick=fn;return b;};
+  const mkDate=t=>{const d=t&&t.toDate?t.toDate():null;if(!d)return null;const s=document.createElement("small");s.textContent=d.toLocaleDateString(undefined,{month:"short",day:"numeric"});return s;};
+
+  async function banUser(uid,name){
+    if(!isAdmin||uid===user.uid)return;
+    if(!confirm("Ban "+(name||"this user")+" and delete all of their posts?"))return;
+    try{
+      await setDoc(doc(db,"banned",uid),{name:name||"",at:serverTimestamp(),by:user.uid});
+      const qs=await getDocs(query(collection(db,"posts"),where("uid","==",uid)));
+      await Promise.all(qs.docs.map(d=>deleteDoc(d.ref)));
+      say((name||"User")+" has been banned and their posts removed.");
+    }catch(e){ say("Couldn't ban ("+(e&&e.code||"error")+")."); }
+  }
+
+  function renderPosts(){
     feed.textContent="";
     if(!posts.length){
       const e=document.createElement("p");e.style.color="var(--muted)";
@@ -366,22 +406,73 @@ if(firebaseConfig.apiKey.startsWith("YOUR_")){
       const hd=document.createElement("header");
       const b=document.createElement("b");b.textContent=p.name||"Fan";hd.appendChild(b);
       if(p.tag){const s=document.createElement("span");s.className="tag";s.textContent=p.tag;hd.appendChild(s);}
-      const d=p.at&&p.at.toDate?p.at.toDate():null;
-      if(d){const sm=document.createElement("small");sm.textContent=d.toLocaleDateString(undefined,{month:"short",day:"numeric"});hd.appendChild(sm);}
+      const dt=mkDate(p.at);if(dt)hd.appendChild(dt);
       a.appendChild(hd);
       const tx=document.createElement("p");tx.textContent=p.text||"";a.appendChild(tx);
-      if(user&&p.uid===user.uid){
-        const del=document.createElement("button");del.type="button";del.textContent="Delete";
-        del.onclick=async()=>{try{await deleteDoc(doc(db,"posts",p.id))}catch(e){say("Couldn't delete that post.")}};
-        a.appendChild(del);
+      const own=user&&p.uid===user.uid;
+      if(own||isAdmin){
+        const acts=document.createElement("div");acts.className="acts";
+        acts.appendChild(mkBtn("Delete",async()=>{try{await deleteDoc(doc(db,"posts",p.id))}catch(e){say("Couldn't delete that post.")}}));
+        if(isAdmin&&!own)acts.appendChild(mkBtn("Ban author",()=>banUser(p.uid,p.name),"danger"));
+        a.appendChild(acts);
       }
       feed.appendChild(a);
     });
-  };
+  }
   onSnapshot(query(collection(db,"posts"),orderBy("at","desc"),limit(50)),snap=>{
     posts=snap.docs.map(d=>({id:d.id,...d.data()}));
-    renderNow();
+    renderPosts();
   },e=>say("Couldn't load the board ("+(e&&e.code||"error")+")."));
+
+  /* ---------- announcements (admin-only channel) ---------- */
+  function renderAnns(){
+    annBox.textContent="";
+    anns.forEach(p=>{
+      const a=document.createElement("article");a.className="post ann";
+      const hd=document.createElement("header");
+      const b=document.createElement("b");b.textContent=p.name||"Admin";hd.appendChild(b);
+      const s=document.createElement("span");s.className="tag a";s.textContent="Announcement";hd.appendChild(s);
+      const dt=mkDate(p.at);if(dt)hd.appendChild(dt);
+      a.appendChild(hd);
+      const tx=document.createElement("p");tx.textContent=p.text||"";a.appendChild(tx);
+      if(isAdmin){
+        const acts=document.createElement("div");acts.className="acts";
+        acts.appendChild(mkBtn("Delete",async()=>{try{await deleteDoc(doc(db,"announcements",p.id))}catch(e){say("Couldn't delete that announcement.")}}));
+        a.appendChild(acts);
+      }
+      annBox.appendChild(a);
+    });
+  }
+  onSnapshot(query(collection(db,"announcements"),orderBy("at","desc"),limit(10)),snap=>{
+    anns=snap.docs.map(d=>({id:d.id,...d.data()}));
+    renderAnns();
+  },()=>{});
+
+  $("abtn").onclick=async()=>{
+    const t=$("atext").value.trim();
+    if(!t||!isAdmin)return;
+    try{
+      await addDoc(collection(db,"announcements"),{
+        text:t.slice(0,1000),uid:user.uid,name:(user.displayName||"Admin").slice(0,40),at:serverTimestamp()
+      });
+      $("atext").value="";
+    }catch(e){ say("Couldn't post the announcement ("+(e&&e.code||"error")+")."); }
+  };
+
+  /* ---------- banned list (admins only) ---------- */
+  function watchBans(){
+    unsubBans=onSnapshot(collection(db,"banned"),snap=>{
+      const list=$("banlist");list.textContent="";
+      if(snap.empty){list.textContent="No one is banned.";return;}
+      snap.docs.forEach(d=>{
+        const row=document.createElement("div");row.className="ban-item";
+        const n=document.createElement("span");n.textContent=(d.data().name||"Unknown")+"  ("+d.id.slice(0,6)+"...)";
+        row.appendChild(n);
+        row.appendChild(mkBtn("Unban",async()=>{try{await deleteDoc(d.ref)}catch(e){say("Couldn't unban.")}}));
+        list.appendChild(row);
+      });
+    },()=>{});
+  }
 }
 </script>
 </body>
