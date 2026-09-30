@@ -354,10 +354,13 @@ if(firebaseConfig.apiKey.startsWith("YOUR_")){
     authOut.hidden=!!u; authIn.hidden=!u;
     if(u){
       $("ainfo").textContent="Signed in as "+(u.displayName||u.email);
-      try{ isAdmin=(await getDoc(doc(db,"admins",u.uid))).exists(); }catch(e){}
+      let adminErr="";
+      try{ isAdmin=(await getDoc(doc(db,"admins",u.uid))).exists(); }catch(e){ adminErr=(e&&e.code)||"error"; }
       try{ isBanned=(await getDoc(doc(db,"banned",u.uid))).exists(); }catch(e){}
       if(isBanned) say("Your account has been banned from posting.");
       else if(isAdmin) say("You're signed in as an admin.");
+      else if(adminErr) say("Couldn't check admin status ("+adminErr+"). Publish the latest firestore.rules in Firebase.");
+      else if(location.search.includes("debug")) say("Not an admin. Your UID is "+u.uid+". The Document ID in the 'admins' collection must match it exactly.");
       else say("");
       if(isAdmin) watchBans();
     } else say("Sign in or create an account to post. Anyone can read the board.");
